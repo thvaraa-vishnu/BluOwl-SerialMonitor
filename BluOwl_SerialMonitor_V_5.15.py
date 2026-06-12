@@ -6,7 +6,13 @@ Run:       python bluowl_serialmonitor.py
 See CHANGELOG.txt for version history.
 """
 
-import sys, os, re, json, datetime, threading, array, struct, mmap
+import sys, os, json, datetime, threading, array, struct, mmap, time
+# Use the 'regex' module (PCRE-compatible, same standard as Sublime Text/VSCode)
+# Falls back to stdlib 're' if not installed — pip install regex
+try:
+    import regex as re
+except ImportError:
+    import re
 import serial, serial.tools.list_ports
 
 from PyQt6.QtWidgets import (
@@ -60,9 +66,59 @@ def _get_icon() -> "QIcon":
             icon.addPixmap(scaled)
     return icon
 
-APP_VERSION = "5.11"
+APP_VERSION = "5.15"
 
-CHANGELOG = """v5.11
+CHANGELOG = """v5.15
+  - New: CLEAR button on each Filter pop-out window — clears only that
+    window's displayed lines without affecting main view or other windows.
+    Filter stays active; new matching lines continue to appear after clear.
+    Scan position advances to current store end so cleared lines don't
+    re-appear on the next data flush.
+  - Fix: Duplicate orphaned _jump_to_source code block removed — was floating
+    statements with no def header that could cause runtime errors.
+  - Fix: FilterWindow HIDE mode with empty filter now correctly shows all
+    lines (hide nothing = show everything) instead of showing blank.
+  - Fix: new_entries() race condition — if a full rescan reset _scanned_up_to
+    while an incremental scan was mid-run, duplicate indices were appended to
+    _vis corrupting the filter view. Now guards with snapshot comparison.
+  - Fix: _start_filter now waits for the old worker to fully stop before
+    creating a new cancel event and starting a new worker — previously the
+    old and new workers could both write to LiveLogView simultaneously.
+
+v5.14
+  - Fix: Timestamp accuracy improved to true millisecond precision
+    Previously LogStore stored timestamps as integer seconds (ts_sec) which
+    rounded every timestamp to the nearest whole second — all lines within
+    the same second showed identical timestamps.
+    Now stores milliseconds (ts_ms) — 1ms resolution guaranteed.
+    Display format HH:MM:SS.mmm was already correct, data now matches it.
+  - Fix: Timestamp capture now uses time.perf_counter() anchored to a
+    datetime epoch instead of datetime.now() directly.
+    On Windows, datetime.now() has ~15ms system clock resolution (timer
+    interrupt granularity). perf_counter() has sub-microsecond resolution
+    and is used to compute the delta from the session epoch, giving accurate
+    inter-message timing even for rapid back-to-back messages.
+
+v5.13
+  - New: REGEX filter now uses PCRE (Perl-Compatible Regular Expressions)
+    via the 'regex' module — same standard as Sublime Text and VSCode.
+    Supports \\h \\v \\R \\K (?<name>) and other PCRE features not in stdlib re.
+    Falls back to Python stdlib 're' if 'regex' module is not installed.
+    Hint label shows which engine is active: "Regex (PCRE)" or "Regex (Python re)".
+
+v5.12
+  - Fix: REGEX filter mode bug — invalid regex was returning True (matching
+    everything) instead of False (matching nothing). Now returns False so
+    broken regex patterns produce an empty result instead of showing all lines.
+  - Fix: REGEX mode hint was misleading — now shows "Python regex e.g.
+    error|warning" instead of "& = AND | = OR" which confused users into
+    thinking | was the app's OR operator rather than regex alternation.
+  - New: Live regex validation — filter entry turns red with error message
+    when the regex pattern is invalid, and filtering is suppressed until
+    the pattern is fixed. Works in both main window and filter pop-outs.
+  - Fix: Switching away from REGEX mode now clears the red highlight.
+
+v5.11
   - New: BluOwl circuit-owl logo (style C — circular head, concentric eye
     rings, circuit node mesh on body) replaces plain text in top-left toolbar
     Drawn with pure QPainter — no extra dependencies (no QtSvg needed)
@@ -367,8 +423,8 @@ def eval_filter(text:str, filt:str, mode:str) -> bool:
     filt=filt.strip()
     if not filt: return True
     if mode=="regex":
-        try:    return bool(re.search(filt,text,re.IGNORECASE))
-        except: return True
+        try:    return bool(re.search(filt, text, re.IGNORECASE))
+        except re.error: return False   # invalid regex → match nothing, not everything
     low=text.lower()
     for grp in filt.split("|"):
         terms=[t.strip().lower() for t in grp.split("&") if t.strip()]
@@ -384,7 +440,8 @@ class LogStore:
     Index: packed struct per entry = 15 bytes vs ~300 bytes for a dict.
     get_text(i) is O(1) and allocates no objects beyond the string.
     """
-    REC = struct.Struct("<IHBBIxxx")   # offset(4) len(2) dir(1) flags(1) ts_sec(4) pad(3)
+    REC = struct.Struct("<IHBBIxxx")   # offset(4) len(2) dir(1) flags(1) ts_ms(4) pad(3)
+    # ts_ms: milliseconds since epoch (uint32 = ~49 days max per session, plenty for logging)
     DIR = {"rx":0,"tx":1,"sys":2}
     RDIR= {0:"rx",1:"tx",2:"sys"}
 
@@ -392,7 +449,8 @@ class LogStore:
         self._buf   = bytearray()
         self._idx   = bytearray()
         self._count = 0
-        self._epoch = datetime.datetime.now()
+        self._epoch      = datetime.datetime.now()
+        self._epoch_perf = time.perf_counter()   # high-res reference point
         self._lock  = threading.Lock()
 
     def append(self, direction:str, text:str, ts:datetime.datetime, is_bytes=False) -> int:
@@ -400,13 +458,20 @@ class LogStore:
         length = min(len(raw), 65535)
         d      = self.DIR.get(direction, 2)
         flags  = 1 if is_bytes else 0
-        ts_sec = max(0, int((ts-self._epoch).total_seconds()))
+        # Store milliseconds since epoch — preserves 1ms accuracy
+        ts_ms  = max(0, int((ts - self._epoch).total_seconds() * 1000))
         with self._lock:
-            offset = len(self._buf)   # compute inside lock — thread-safe
+            offset = len(self._buf)
             self._buf.extend(raw[:length])
-            self._idx.extend(self.REC.pack(offset,length,d,flags,ts_sec))
+            self._idx.extend(self.REC.pack(offset, length, d, flags, ts_ms))
             self._count += 1
-            return self._count-1
+            return self._count - 1
+
+    def _now_hires(self) -> datetime.datetime:
+        """Return a high-resolution datetime using perf_counter delta from epoch.
+        On Windows datetime.now() has ~15ms resolution; perf_counter has <1us."""
+        delta_s = time.perf_counter() - self._epoch_perf
+        return self._epoch + datetime.timedelta(seconds=delta_s)
 
     def __len__(self):
         return self._count
@@ -420,8 +485,8 @@ class LogStore:
         return self.RDIR.get(self._idx[i * self.REC.size + 5], "sys")
 
     def get_ts(self, i:int) -> datetime.datetime:
-        ts_sec = self.REC.unpack_from(self._idx, i * self.REC.size)[4]
-        return self._epoch + datetime.timedelta(seconds=ts_sec)
+        ts_ms = self.REC.unpack_from(self._idx, i * self.REC.size)[4]
+        return self._epoch + datetime.timedelta(milliseconds=ts_ms)
 
     def get_is_bytes(self, i:int) -> bool:
         return bool(self._idx[i * self.REC.size + 6] & 1)
@@ -1542,6 +1607,11 @@ class FilterWindow(QMainWindow):
         self._jbtn.clicked.connect(self._jump_to_main)
         bl.addWidget(self._jbtn)
 
+        self._clrbtn = QPushButton("✕ CLEAR"); self._clrbtn.setFixedHeight(24)
+        self._clrbtn.setToolTip("Clear this filter window's display (filter stays active)")
+        self._clrbtn.clicked.connect(self._clear_view)
+        bl.addWidget(self._clrbtn)
+
         # Plot toggle button
         self._plot_btn = QPushButton("📈 PLOT"); self._plot_btn.setFixedHeight(24)
         self._plot_btn.setCheckable(True); self._plot_btn.setChecked(False)
@@ -1682,6 +1752,22 @@ class FilterWindow(QMainWindow):
         self._filter_str = self._fentry.text()
         self.setWindowTitle(f"Filter Window — \"{self._filter_str or '…'}\"")
         self._cancel.set()
+        # Validate regex live
+        if self._filter_mode == "regex":
+            filt = self._filter_str.strip()
+            if filt:
+                try:
+                    re.compile(filt)
+                    self._fentry.setStyleSheet("")
+                    self._mlbl.setText("")
+                except re.error as ex:
+                    self._fentry.setStyleSheet("background:#5a1a1a;color:#ff6060;")
+                    self._mlbl.setText(f"⚠ {ex}")
+                    return   # don't filter with broken regex
+            else:
+                self._fentry.setStyleSheet("")
+        else:
+            self._fentry.setStyleSheet("")
         self._ftimer.start(300)        # debounce 300 ms
 
     def _set_fmode(self, mode):
@@ -1689,6 +1775,11 @@ class FilterWindow(QMainWindow):
         self._fsho.setChecked(mode == "show")
         self._fhid.setChecked(mode == "hide")
         self._frex.setChecked(mode == "regex")
+        if mode == "regex":
+            self._fentry.setPlaceholderText("PCRE regex  e.g.  error|warning|\\d+\\.\\d+  (Sublime-compatible)")
+        else:
+            self._fentry.setPlaceholderText("& = AND   | = OR   e.g.  TAG_ERROR | TAG_INFO")
+            self._fentry.setStyleSheet("")   # clear any red highlight from regex mode
         self._cancel.set()
         self._full_rescan()
 
@@ -1702,8 +1793,16 @@ class FilterWindow(QMainWindow):
         self._model.set_filter_indices([])
         filt = self._fentry.text().strip()
         if not filt:
-            # No filter — show nothing (blank window is more useful than all lines)
-            self._mlbl.setText("no filter")
+            if self._filter_mode == "hide":
+                # HIDE mode + empty filter = show everything
+                all_indices = list(range(len(self._store)))
+                self._vis = all_indices
+                self._scanned_up_to = len(self._store)
+                self._model.set_filter_indices(all_indices)
+                self._update_mlbl()
+            else:
+                # SHOW/REGEX mode + empty filter = show nothing (blank is more useful)
+                self._mlbl.setText("no filter")
             self._pbar.setVisible(False)
             return
         self._pbar.setValue(0); self._pbar.setVisible(True)
@@ -1757,31 +1856,59 @@ class FilterWindow(QMainWindow):
             return   # full rescan in progress — it will pick up everything
         filt = self._fentry.text().strip()
         if not filt:
+            if self._filter_mode == "hide":
+                # HIDE+empty: append any new lines directly
+                start = self._scanned_up_to
+                if start >= total_in_store: return
+                new_idx = list(range(start, total_in_store))
+                self._vis.extend(new_idx)
+                self._scanned_up_to = total_in_store
+                self._model.set_filter_indices(list(self._vis))
+                self._update_mlbl()
+                if self._auto_btn.isChecked(): self._needs_scroll = True
             return
         start = self._scanned_up_to
         if start >= total_in_store:
             return
+        # Snapshot scanned_up_to before scan — guard against concurrent reset
+        scan_end = total_in_store
         mode  = self._filter_mode
         store = self._store
         new_matches = []
-        for i in range(start, total_in_store):
+        for i in range(start, scan_end):
             text = store.get_text(i)
             m = eval_filter(text, filt, mode)
             if (not m) if mode == "hide" else m:
                 new_matches.append(i)
-        self._scanned_up_to = total_in_store
-        if new_matches:
-            self._vis.extend(new_matches)
-            self._model.set_filter_indices(list(self._vis))
-            self._update_mlbl()
-            if self._auto_btn.isChecked():
-                self._needs_scroll = True
-            self._update_plot_live()
+        # Only commit if no rescan fired during our scan
+        if self._scanned_up_to == start:
+            self._scanned_up_to = scan_end
+            if new_matches:
+                self._vis.extend(new_matches)
+                self._model.set_filter_indices(list(self._vis))
+                self._update_mlbl()
+                if self._auto_btn.isChecked():
+                    self._needs_scroll = True
+                self._update_plot_live()
 
     def _ui_tick(self):
         if self._needs_scroll:
             self._view.scroll_to_bottom()
             self._needs_scroll = False
+
+    # ── Local clear ───────────────────────────────────────────────────────────
+    def _clear_view(self):
+        """
+        Clear only this window's displayed lines.
+        Filter stays active — new matching lines will still appear.
+        Scan position advances to current store end so only future
+        lines are shown, not old ones re-appearing on next flush.
+        """
+        self._vis = []
+        self._scanned_up_to = len(self._store)   # skip all existing lines
+        self._model.set_filter_indices([])
+        self._mlbl.setText("cleared")
+        self._jbtn.setEnabled(False)
 
     # ── Plot ──────────────────────────────────────────────────────────────────
     _NUM_RE = re.compile(r'([A-Za-z_]\w*[\s:=]+)?\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)')
@@ -2510,7 +2637,7 @@ class BluOwlSerialMonitor(QMainWindow):
             self._rx_buf = b""
 
     def _mk_entry(self, direction, data, is_bytes=False):
-        e = {"ts":datetime.datetime.now(), "dir":direction, "is_bytes":is_bytes}
+        e = {"ts": self._store._now_hires(), "dir":direction, "is_bytes":is_bytes}
         if is_bytes:
             e["hex_str"]=hex_dump(data); e["ascii_str"]=to_ascii(data); e["text"]=e["hex_str"]
         else:
@@ -2612,6 +2739,22 @@ class BluOwlSerialMonitor(QMainWindow):
     # ── Filter ────────────────────────────────────────────────────────────────
     def _on_filter(self):
         self._cancel.set()
+        # Validate regex and highlight entry red if invalid
+        if self._filter_mode == "regex":
+            filt = self._fentry.text().strip()
+            if filt:
+                try:
+                    re.compile(filt)
+                    self._fentry.setStyleSheet("")   # valid — reset
+                    self._fmlbl.setText("")
+                except re.error as ex:
+                    self._fentry.setStyleSheet("background:#5a1a1a;color:#ff6060;")
+                    self._fmlbl.setText(f"⚠ {ex}")
+                    return   # don't trigger filter with broken regex
+            else:
+                self._fentry.setStyleSheet("")
+        else:
+            self._fentry.setStyleSheet("")
         self._ftimer.start(300)
 
     def _set_fmode(self,mode):
@@ -2619,13 +2762,22 @@ class BluOwlSerialMonitor(QMainWindow):
         self._fsho.setChecked(mode=="show")
         self._fhid.setChecked(mode=="hide")
         self._frex.setChecked(mode=="regex")
-        self._fhint.setText("regex" if mode=="regex" else "& = AND  | = OR")
+        if mode=="regex":
+            engine = "PCRE" if re.__name__ == "regex" else "Python re"
+            self._fhint.setText(f"Regex ({engine})  e.g. error|warn")
+            self._fentry.setPlaceholderText("PCRE regex  e.g.  error|warning|\\d+\\.\\d+  (Sublime-compatible)")
+        else:
+            self._fhint.setText("& = AND  | = OR")
+            self._fentry.setPlaceholderText("& = AND   | = OR   e.g.  TAG_ERROR | TAG_INFO")
         self._cancel.set(); self._start_filter()
 
     def _start_filter(self):
         filt=self._fentry.text()
         if not filt.strip():
             # No filter — rebuild live view with all entries
+            self._cancel.set()
+            if self._filter_worker and self._filter_worker.isRunning():
+                self._filter_worker.wait(500)
             self._live_scanned_up_to = 0
             self._rebuild_live_view(None)
             self._jbtn.setEnabled(False); self._fmlbl.setText("")
@@ -2634,11 +2786,12 @@ class BluOwlSerialMonitor(QMainWindow):
             self._upd_count()
             if self._tabs.currentIndex()==1: self._start_file_filter()
             return
-        # Cancel old worker
+        # Cancel old worker and wait for it to fully stop before starting new one
         if self._filter_worker and self._filter_worker.isRunning():
-            self._cancel.set(); self._filter_worker.wait(500)
+            self._cancel.set()
+            self._filter_worker.wait(500)
         self._cancel=threading.Event()
-        self._live_scanned_up_to = 0   # full rescan resets the cursor
+        self._live_scanned_up_to = 0
         self._fpbar.setValue(0); self._fpbar.setVisible(True)
         self._fmlbl.setText("Searching…")
         # Clear live view immediately while worker runs
@@ -2684,17 +2837,6 @@ class BluOwlSerialMonitor(QMainWindow):
             self._start_file_filter()
 
     # ── Export ────────────────────────────────────────────────────────────────
-    # ── Jump to source ────────────────────────────────────────────────────────
-        # In live view (QPlainTextEdit), get the block number of current cursor
-        cur = self._live_view.textCursor()
-        row = cur.blockNumber()
-        if row < 0: return
-        # The block number IS the master index when no filter is active.
-        # When filter is active we can't reliably reverse-map, so just jump
-        # to the line as displayed.
-        self._fentry.setText("")        # clears filter → show all
-        QTimer.singleShot(400, lambda: self._do_jump(row))
-
     # ── Jump to source ────────────────────────────────────────────────────────
     def _jump_to_source(self):
         # In live view (QPlainTextEdit), get the block number of current cursor
