@@ -1,7 +1,8 @@
 @echo off
+cd /d "%~dp0"
 setlocal enabledelayedexpansion
 :: ─────────────────────────────────────────────────────────────────────────────
-:: nuitka_build_exe_v2_0.bat  —  Nuitka EXE Builder for BluOwl SerialMonitor
+:: nuitka_build_exe_v2_1.bat  —  Nuitka EXE Builder for BluOwl SerialMonitor
 :: Version history:
 ::   v1.0  Initial Nuitka build script (replaced PyInstaller)
 ::   v1.1  Added icon extraction from embedded base64 in .py file
@@ -16,12 +17,16 @@ setlocal enabledelayedexpansion
 ::   v2.0  Added --disable-cache=all to force 100%% fresh recompile every time
 ::         Added __pycache__, LOCALAPPDATA\Nuitka and TEMP\Nuitka to clean list
 ::         File renamed to match version: nuitka_build_exe_v2_0.bat
+::   v2.1  Added cd /d "%~dp0" so bat always runs from its own folder regardless
+::         of where it is launched from (fixes "No .py file found" when invoked
+::         from a different working directory)
+::         File renamed to match version: nuitka_build_exe_v2_1.bat
 :: ─────────────────────────────────────────────────────────────────────────────
-title BluOwl SerialMonitor — Nuitka EXE Builder  v2.0
+title BluOwl SerialMonitor — Nuitka EXE Builder  v2.1
 color 0B
 echo.
 echo  =============================================
-echo   BluOwl SerialMonitor  —  Nuitka EXE Builder  v2.0
+echo   BluOwl SerialMonitor  —  Nuitka EXE Builder  v2.1
 echo  =============================================
 echo.
 

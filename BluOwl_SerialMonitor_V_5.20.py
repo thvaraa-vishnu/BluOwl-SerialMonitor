@@ -7,6 +7,7 @@ See CHANGELOG.txt for version history.
 """
 
 import sys, os, json, datetime, threading, array, struct, mmap, time
+from dataclasses import dataclass, field, asdict
 # Use the 'regex' module (PCRE-compatible, same standard as Sublime Text/VSCode)
 # Falls back to stdlib 're' if not installed — pip install regex
 try:
@@ -22,15 +23,19 @@ from PyQt6.QtWidgets import (
     QTextEdit, QPlainTextEdit, QMessageBox, QColorDialog, QProgressBar,
     QStyledItemDelegate, QStyleOptionViewItem, QAbstractItemView,
     QScrollBar, QStyle, QSplitter, QSizePolicy,
+    QScrollArea, QInputDialog, QFormLayout, QDialogButtonBox,
+    QMenu, QLayout, QMenuBar, QTableWidget, QTableWidgetItem,
+    QHeaderView, QCheckBox,
 )
 from PyQt6.QtCore import (
     Qt, QThread, pyqtSignal, QTimer, QAbstractListModel,
     QModelIndex, QSize, QRect, QPointF, QRectF,
+    QMimeData, QPoint,
 )
 from PyQt6.QtGui import (
     QFont, QFontMetrics, QColor, QPainter, QPen, QBrush,
     QKeySequence, QShortcut, QTextDocument, QTextDocument as _QTD,
-    QTextCursor, QTextCharFormat, QPolygonF,
+    QTextCursor, QTextCharFormat, QPolygonF, QDrag, QAction,
 )
 
 # ─── Version ──────────────────────────────────────────────────────────────────
@@ -66,64 +71,121 @@ def _get_icon() -> "QIcon":
             icon.addPixmap(scaled)
     return icon
 
-APP_VERSION = "5.15"
+APP_VERSION = "5.20"
 
-CHANGELOG = """v5.15
-  - New: CLEAR button on each Filter pop-out window — clears only that
-    window's displayed lines without affecting main view or other windows.
-    Filter stays active; new matching lines continue to appear after clear.
-    Scan position advances to current store end so cleared lines don't
-    re-appear on the next data flush.
-  - Fix: Duplicate orphaned _jump_to_source code block removed — was floating
-    statements with no def header that could cause runtime errors.
-  - Fix: FilterWindow HIDE mode with empty filter now correctly shows all
-    lines (hide nothing = show everything) instead of showing blank.
-  - Fix: new_entries() race condition — if a full rescan reset _scanned_up_to
-    while an incremental scan was mid-run, duplicate indices were appended to
-    _vis corrupting the filter view. Now guards with snapshot comparison.
-  - Fix: _start_filter now waits for the old worker to fully stop before
-    creating a new cancel event and starting a new worker — previously the
-    old and new workers could both write to LiveLogView simultaneously.
+CHANGELOG = """v5.20
+  - Change: CMD buttons use theme palette colours only — custom colour picker removed.
+    Buttons now show :hover (accent border) and :pressed (inset + darker bg) states
+    for clear tactile feedback without needing custom colours.
+  - Change: Green flash on button click uses palette green instead of hardcoded value.
 
-v5.14
-  - Fix: Timestamp accuracy improved to true millisecond precision
-    Previously LogStore stored timestamps as integer seconds (ts_sec) which
-    rounded every timestamp to the nearest whole second — all lines within
-    the same second showed identical timestamps.
-    Now stores milliseconds (ts_ms) — 1ms resolution guaranteed.
-    Display format HH:MM:SS.mmm was already correct, data now matches it.
-  - Fix: Timestamp capture now uses time.perf_counter() anchored to a
-    datetime epoch instead of datetime.now() directly.
-    On Windows, datetime.now() has ~15ms system clock resolution (timer
-    interrupt granularity). perf_counter() has sub-microsecond resolution
-    and is used to compute the delta from the session epoch, giving accurate
-    inter-message timing even for rapid back-to-back messages.
+v5.19
+  - Change: CMD panel is now a floating window (like filter pop-outs), not a tab
+    Open/close with the "🎮 CMD" toggle button in the filter bar, or via the
+    switch_cmd shortcut. LiveLog remains in the main window at all times.
+  - Fix: Shortcuts dialog — connect action was labeled as the section header
+    ("Built-in Actions") because _insert_separator overwrote row 0's label.
+    Separators are now pre-inserted into the rows list; each action keeps its label.
+  - New: CMD button flash — button briefly turns green on click to confirm send.
 
-v5.13
+v5.18
+  - New: Custom keyboard shortcuts (Edit → Shortcuts…)
+    Dedicated dialog for assigning key combos to built-in actions and
+    CMD panel buttons. Two shortcut types:
+      Standard — active when main window has focus (QShortcut WindowShortcut)
+      Global   — active anywhere in the app including text fields
+                 (QShortcut ApplicationShortcut, opt-in per shortcut)
+    Built-in assignable actions: Connect/Disconnect, Clear, Export,
+    Toggle auto-scroll, Focus filter bar, Open filter window,
+    Switch tabs (LIVE/FILE/CMD), Toggle timestamps, Toggle HEX.
+    CMD buttons: any CMD button can be triggered by a key combo.
+    Conflict detection: warns if two actions share the same combo.
+    Shortcuts saved inside the .boc profile file — travel with the profile.
+    ShortcutManager re-registers all shortcuts on every profile load/change.
+    KeyCaptureEdit widget: click → press combo → recorded instantly.
+    Backspace or Escape clears a shortcut field.
+
+v5.17
+  - Fix: JUMP button completely broken — _jump_to_source body was accidentally
+    merged into _on_cmd_profile_changed during v5.16 CMD tab addition, leaving
+    _jump_to_source as an undefined method. Separated and restored correctly.
+  - Fix: Line numbers missing from live view — when QListView was replaced with
+    QPlainTextEdit, the LogDelegate gutter was lost. Restored via a proper
+    _LineGutter widget using Qt's standard line-number-area pattern:
+    viewportMargins reserves space, blockCountChanged/updateRequest signals
+    keep it in sync, resizeEvent repositions it. Numbers auto-widen as line
+    count grows (e.g. 1-digit → 4-digit). Gutter background uses theme bg2,
+    numbers use theme fg_dim. Updates correctly on font and theme changes.
+
+v5.16
+  - New: CMD tab — UI Test Mode with renameable command buttons
+    A new "🎮 CMD" tab alongside LIVE and FILE VIEW.
+    Create renameable buttons each assigned a UART command.
+    Single click sends the command instantly (greyed out when disconnected).
+    Double-click or right-click → Edit (label, command, colour).
+    Drag buttons to reorder within the panel.
+    Buttons auto-fit width to label length (min 80px, max 240px).
+    Unlimited buttons with scrolling.
+    Profile toolbar: name field, Load, Save, Save As, line-ending selector.
+    Profiles saved as .boc (BluOwl Command) files — plain JSON internally.
+    Last used profile auto-loaded on startup.
+    Tab title shows profile name and * when unsaved changes exist.
+    Theme and font changes propagate instantly to all CMD buttons.
+    Sends via dedicated _send_command() — TX bar unaffected, TX logged
+    to live view exactly like a manual send.
+
+v5.11 → v5.15  (consolidated)
+  --- Timestamp accuracy ---
+  - Fix: LogStore was storing timestamps as integer seconds, rounding every
+    entry to the nearest whole second. Now stores milliseconds (ts_ms) giving
+    true 1ms resolution. Display format HH:MM:SS.mmm was already correct —
+    the underlying data now matches it.
+  - Fix: Timestamp capture switched from datetime.now() (Windows resolution
+    ~15ms) to time.perf_counter() anchored to a datetime epoch, giving
+    sub-millisecond inter-message accuracy even for rapid back-to-back lines.
+
+  --- REGEX filter ---
+  - Fix: Invalid regex was returning True (matching everything) instead of
+    False. Broken patterns now produce an empty result, not all lines.
+  - Fix: REGEX mode hint wrongly showed "& = AND | = OR" — now shows
+    "Python regex e.g. error|warning" so users understand | is regex
+    alternation, not the app's own OR operator.
+  - New: Live regex validation — filter entry turns red with the error
+    message when the pattern is invalid; filtering is suppressed until fixed.
+    Works in both the main window and all filter pop-out windows.
+  - Fix: Switching away from REGEX mode now clears the red highlight.
   - New: REGEX filter now uses PCRE (Perl-Compatible Regular Expressions)
     via the 'regex' module — same standard as Sublime Text and VSCode.
     Supports \\h \\v \\R \\K (?<name>) and other PCRE features not in stdlib re.
-    Falls back to Python stdlib 're' if 'regex' module is not installed.
-    Hint label shows which engine is active: "Regex (PCRE)" or "Regex (Python re)".
+    Falls back to Python stdlib 're' if 'regex' is not installed.
+    Hint label shows active engine: "Regex (PCRE)" or "Regex (Python re)".
 
-v5.12
-  - Fix: REGEX filter mode bug — invalid regex was returning True (matching
-    everything) instead of False (matching nothing). Now returns False so
-    broken regex patterns produce an empty result instead of showing all lines.
-  - Fix: REGEX mode hint was misleading — now shows "Python regex e.g.
-    error|warning" instead of "& = AND | = OR" which confused users into
-    thinking | was the app's OR operator rather than regex alternation.
-  - New: Live regex validation — filter entry turns red with error message
-    when the regex pattern is invalid, and filtering is suppressed until
-    the pattern is fixed. Works in both main window and filter pop-outs.
-  - Fix: Switching away from REGEX mode now clears the red highlight.
+  --- Filter logic fixes ---
+  - Fix: Duplicate orphaned _jump_to_source code block removed — floating
+    statements with no def header that could cause runtime errors.
+  - Fix: FilterWindow HIDE mode with empty filter now correctly shows all
+    lines (hide nothing = show everything) instead of a blank window.
+  - Fix: new_entries() race condition — if a full rescan reset _scanned_up_to
+    while an incremental scan was mid-run, duplicate indices were appended
+    to _vis corrupting the filter view. Fixed with snapshot comparison guard.
+  - Fix: _start_filter now waits for the old worker to fully stop before
+    creating a new cancel event and starting a new worker — previously both
+    workers could write to LiveLogView simultaneously causing duplicate lines.
 
-v5.11
-  - New: BluOwl circuit-owl logo (style C — circular head, concentric eye
-    rings, circuit node mesh on body) replaces plain text in top-left toolbar
-    Drawn with pure QPainter — no extra dependencies (no QtSvg needed)
-  - New: App icon (taskbar, EXE, title bar) updated to match the owl logo
-    Regenerated at 16/32/48/64/128/256px with 4x supersampling
+  --- App icon & logo ---
+  - New: BluOwl circuit-owl logo (circular head, concentric eye rings,
+    circuit node mesh on body) drawn with pure QPainter in the top-left
+    toolbar. No QtSvg dependency needed.
+  - New: App icon (taskbar, EXE, title bar) redrawn as the same owl design,
+    rendered from SVG via cairosvg at 16/32/48/64/128/256px with LANCZOS
+    downscaling — pixel-perfect match to the preview at all Windows sizes.
+
+  --- Filter pop-out windows ---
+  - New: CLEAR button on each filter pop-out window — clears only that
+    window's displayed lines without affecting the main view or other windows.
+    Filter stays active; new matching lines continue to appear after clear.
+    Scan position advances to current store end so cleared lines do not
+    re-appear on the next data flush.
 
 v5.10
   - Renamed: App is now "BluOwl SerialMonitor" (was "UART Logger")
@@ -482,14 +544,16 @@ class LogStore:
         return self._buf[offset:offset+length].decode("utf-8","replace")
 
     def get_dir(self, i:int) -> str:
-        return self.RDIR.get(self._idx[i * self.REC.size + 5], "sys")
+        _,_,d,_,_ = self.REC.unpack_from(self._idx, i * self.REC.size)
+        return self.RDIR.get(d, "sys")
 
     def get_ts(self, i:int) -> datetime.datetime:
         ts_ms = self.REC.unpack_from(self._idx, i * self.REC.size)[4]
         return self._epoch + datetime.timedelta(milliseconds=ts_ms)
 
     def get_is_bytes(self, i:int) -> bool:
-        return bool(self._idx[i * self.REC.size + 6] & 1)
+        _,_,_,flags,_ = self.REC.unpack_from(self._idx, i * self.REC.size)
+        return bool(flags & 1)
 
     def clear(self):
         with self._lock:
@@ -915,6 +979,19 @@ class FileFilterWorker(QThread):
 
 # ─── Live Log View (QPlainTextEdit — character-selectable) ────────────────────
 
+class _LineGutter(QWidget):
+    """Thin left-side gutter that paints line numbers for LiveLogView."""
+    def __init__(self, editor: "LiveLogView"):
+        super().__init__(editor)
+        self._editor = editor
+
+    def sizeHint(self):
+        return QSize(self._editor._gutter_width(), 0)
+
+    def paintEvent(self, event):
+        self._editor._paint_gutter(event)
+
+
 class LiveLogView(QPlainTextEdit):
     """
     Read-only QPlainTextEdit used for the live serial log.
@@ -947,7 +1024,59 @@ class LiveLogView(QPlainTextEdit):
         self.setUndoRedoEnabled(False)
         self.setMaximumBlockCount(0)   # unlimited
 
+        # Line number gutter
+        self._gutter = _LineGutter(self)
+        self.blockCountChanged.connect(self._update_gutter_width)
+        self.updateRequest.connect(self._update_gutter)
+        self._update_gutter_width()
+
         self._apply_palette()
+
+    def _gutter_width(self) -> int:
+        digits = max(1, len(str(max(1, self.blockCount()))))
+        return 8 + self.fontMetrics().horizontalAdvance("9") * digits
+
+    def _update_gutter_width(self):
+        self.setViewportMargins(self._gutter_width(), 0, 0, 0)
+
+    def _update_gutter(self, rect, dy):
+        if dy:
+            self._gutter.scroll(0, dy)
+        else:
+            self._gutter.update(0, rect.y(), self._gutter.width(), rect.height())
+        if rect.contains(self.viewport().rect()):
+            self._update_gutter_width()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        cr = self.contentsRect()
+        self._gutter.setGeometry(QRect(cr.left(), cr.top(),
+                                       self._gutter_width(), cr.height()))
+
+    def _paint_gutter(self, event):
+        p   = self._pal
+        painter = QPainter(self._gutter)
+        painter.fillRect(event.rect(), QColor(p.get("bg2", "#1e1e2e")))
+        block       = self.firstVisibleBlock()
+        block_num   = block.blockNumber()
+        top         = int(self.blockBoundingGeometry(block)
+                          .translated(self.contentOffset()).top())
+        bottom      = top + int(self.blockBoundingRect(block).height())
+        line_height = int(self.blockBoundingRect(block).height())
+
+        painter.setFont(self._font)
+        while block.isValid() and top <= event.rect().bottom():
+            if block.isVisible() and bottom >= event.rect().top():
+                painter.setPen(QColor(p.get("fg_dim", "#555")))
+                painter.drawText(0, top, self._gutter.width() - 4,
+                                 line_height,
+                                 Qt.AlignmentFlag.AlignRight,
+                                 str(block_num + 1))
+            block      = block.next()
+            top        = bottom
+            bottom    += line_height
+            block_num += 1
+        painter.end()
 
     # ── Palette / font ────────────────────────────────────────────────────────
     def _apply_palette(self):
@@ -967,6 +1096,8 @@ class LiveLogView(QPlainTextEdit):
         self._font = font
         self.setFont(font)
         self._apply_palette()
+        self._update_gutter_width()
+        self._gutter.update()
         # Re-render all existing content with new colours
         self._rerender()
 
@@ -1522,6 +1653,980 @@ class PlotView(QWidget):
         self.update()
 
 
+# ─── Command Profile data classes ─────────────────────────────────────────────
+@dataclass
+class ButtonConfig:
+    label:   str   = "Button"
+    command: str   = ""
+    color:   str   = ""    # hex e.g. "#2a5a2a", empty = theme default
+
+@dataclass
+class CommandProfile:
+    name:        str              = "Untitled"
+    line_ending: str              = "CRLF"
+    buttons:     list             = field(default_factory=list)
+    shortcuts:   dict             = field(default_factory=dict)
+    # shortcuts = {
+    #   "action_id":  "Ctrl+Shift+C",   # built-in action
+    #   "cmd_btn_0":  "F1",             # CMD button 0
+    #   "cmd_btn_1":  "F2",             # CMD button 1
+    # }
+
+    def to_dict(self):
+        return {"name":        self.name,
+                "line_ending": self.line_ending,
+                "buttons":     [asdict(b) for b in self.buttons],
+                "shortcuts":   self.shortcuts}
+
+    @staticmethod
+    def from_dict(d: dict) -> "CommandProfile":
+        btns = [ButtonConfig(**b) for b in d.get("buttons", [])]
+        return CommandProfile(
+            name        = d.get("name", "Untitled"),
+            line_ending = d.get("line_ending", "CRLF"),
+            buttons     = btns,
+            shortcuts   = d.get("shortcuts", {}),
+        )
+
+
+# ─── Flow Layout (wrapping, drag-to-reorder) ──────────────────────────────────
+class FlowLayout(QLayout):
+    """
+    Left-to-right wrapping layout. Items wrap to next row when width exceeded.
+    Minimum height reported correctly so the scroll area sizes properly.
+    """
+    def __init__(self, parent=None, h_spacing=8, v_spacing=8):
+        super().__init__(parent)
+        self._items      = []
+        self._h_spacing  = h_spacing
+        self._v_spacing  = v_spacing
+
+    def addItem(self, item):
+        self._items.append(item)
+
+    def insertWidget(self, index: int, widget):
+        self.addWidget(widget)
+        # Move to correct position
+        item = self._items.pop()
+        self._items.insert(index, item)
+        self.update()
+
+    def count(self):
+        return len(self._items)
+
+    def itemAt(self, index):
+        return self._items[index] if 0 <= index < len(self._items) else None
+
+    def takeAt(self, index):
+        if 0 <= index < len(self._items):
+            return self._items.pop(index)
+        return None
+
+    def expandingDirections(self):
+        return Qt.Orientation(0)
+
+    def hasHeightForWidth(self):
+        return True
+
+    def heightForWidth(self, width):
+        return self._do_layout(QRect(0, 0, width, 0), test_only=True)
+
+    def setGeometry(self, rect):
+        super().setGeometry(rect)
+        self._do_layout(rect, test_only=False)
+
+    def sizeHint(self):
+        return self.minimumSize()
+
+    def minimumSize(self):
+        size = QSize()
+        for item in self._items:
+            size = size.expandedTo(item.minimumSize())
+        m = self.contentsMargins()
+        size += QSize(m.left()+m.right(), m.top()+m.bottom())
+        return size
+
+    def _do_layout(self, rect, test_only):
+        m      = self.contentsMargins()
+        x      = rect.x() + m.left()
+        y      = rect.y() + m.top()
+        row_h  = 0
+        right  = rect.right() - m.right()
+
+        for item in self._items:
+            w    = item.widget() if item.widget() else None
+            iw   = item.sizeHint().width()
+            ih   = item.sizeHint().height()
+
+            # Wrap if needed
+            if x + iw > right and x > rect.x() + m.left():
+                x     = rect.x() + m.left()
+                y    += row_h + self._v_spacing
+                row_h = 0
+
+            if not test_only:
+                item.setGeometry(QRect(QPoint(x, y), item.sizeHint()))
+
+            x    += iw + self._h_spacing
+            row_h = max(row_h, ih)
+
+        return y + row_h - rect.y() + m.bottom()
+
+
+# ─── Button Edit Dialog ────────────────────────────────────────────────────────
+class ButtonEditDialog(QDialog):
+    def __init__(self, cfg: ButtonConfig, palette: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Edit Command Button")
+        self.setModal(True)
+        self._cfg     = ButtonConfig(cfg.label, cfg.command, cfg.color)
+        self._palette = palette
+
+        lay = QFormLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(10)
+
+        self._lbl_e = QLineEdit(cfg.label)
+        self._cmd_e = QLineEdit(cfg.command)
+        self._cmd_e.setPlaceholderText("UART command to send")
+        lay.addRow("Label:", self._lbl_e)
+        lay.addRow("Command:", self._cmd_e)
+
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok |
+            QDialogButtonBox.StandardButton.Cancel)
+        bb.accepted.connect(self._on_ok)
+        bb.rejected.connect(self.reject)
+        lay.addRow(bb)
+
+    def _on_ok(self):
+        self._cfg.label   = self._lbl_e.text().strip() or "Button"
+        self._cfg.command = self._cmd_e.text()
+        self.accept()
+
+    def result_config(self) -> ButtonConfig:
+        return self._cfg
+
+
+# ─── Command Button widget ────────────────────────────────────────────────────
+class CmdButton(QPushButton):
+    """
+    A styled command button. Supports:
+      - Single click → send command
+      - Double-click → edit dialog
+      - Right-click context menu → Edit / Change Colour / Delete
+      - Drag → reorder within FlowLayout
+    """
+    edit_requested   = pyqtSignal(object)   # emits self
+    delete_requested = pyqtSignal(object)   # emits self
+
+    def __init__(self, cfg: ButtonConfig, palette: dict, font: QFont,
+                 send_fn, parent=None):
+        super().__init__(parent)
+        self._cfg     = cfg
+        self._pal     = palette
+        self._send_fn = send_fn
+        self._drag_start_pos = None
+
+        self.setFont(font)
+        self.setFixedHeight(36)
+        self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._show_ctx_menu)
+        self.clicked.connect(self._on_click)
+        self._refresh()
+
+    def _refresh(self):
+        self.setText(self._cfg.label)
+        fm  = QFontMetrics(self.font())
+        w   = max(80, fm.horizontalAdvance(self._cfg.label) + 32)
+        self.setFixedWidth(min(w, 240))
+        bg  = self._pal.get("bg2",  "#222")
+        fg  = self._pal.get("fg",   "#eee")
+        brd = self._pal.get("border","#444")
+        hov = self._pal.get("bg3",  "#333")
+        rx  = self._pal.get("rx",   "#4a90d9")
+        drk = self._pal.get("bg",   "#111")
+        self.setStyleSheet(
+            f"QPushButton{{background:{bg};color:{fg};border:1px solid {brd};"
+            f"border-radius:4px;padding:4px 10px;font-weight:bold;}}"
+            f"QPushButton:hover{{background:{hov};border-color:{rx};}}"
+            f"QPushButton:pressed{{background:{drk};border-color:{rx};"
+            f"padding:5px 9px 3px 11px;}}"
+            f"QPushButton:disabled{{opacity:0.35;}}"
+        )
+        if self._cfg.command:
+            self.setToolTip(f"Send: {self._cfg.command}")
+
+    def update_style(self, palette: dict, font: QFont):
+        self._pal = palette
+        self.setFont(font)
+        self._refresh()
+
+    def set_connected(self, on: bool):
+        self.setEnabled(on)
+
+    @property
+    def config(self) -> ButtonConfig:
+        return self._cfg
+
+    def apply_edit(self, new_cfg: ButtonConfig):
+        self._cfg = new_cfg
+        self._refresh()
+
+    # ── Interaction ───────────────────────────────────────────────────────────
+    def _on_click(self):
+        if self._cfg.command:
+            self._send_fn(self._cfg.command)
+            self._flash()
+
+    def _flash(self):
+        orig  = self.styleSheet()
+        green = self._pal.get("green", "#00e676")
+        self.setStyleSheet(
+            f"QPushButton{{background:{green};color:#000;"
+            f"border:1px solid {green};border-radius:4px;"
+            f"padding:4px 10px;font-weight:bold;}}"
+        )
+        QTimer.singleShot(200, lambda: self.setStyleSheet(orig))
+
+    def mouseDoubleClickEvent(self, event):
+        self.edit_requested.emit(self)
+
+    def _show_ctx_menu(self, pos):
+        menu = QMenu(self)
+        menu.addAction("✎  Edit",         lambda: self.edit_requested.emit(self))
+        menu.addAction("🗑  Delete",       lambda: self.delete_requested.emit(self))
+        menu.exec(self.mapToGlobal(pos))
+
+    # ── Drag ──────────────────────────────────────────────────────────────────
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not (event.buttons() & Qt.MouseButton.LeftButton):
+            return
+        if self._drag_start_pos is None:
+            return
+        dist = (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+        if dist < 8:
+            return
+        drag = QDrag(self)
+        mime = QMimeData()
+        mime.setText(str(id(self)))   # use object id to identify source
+        drag.setMimeData(mime)
+        drag.exec(Qt.DropAction.MoveAction)
+
+
+# ─── Command Panel ─────────────────────────────────────────────────────────────
+class CommandPanel(QWidget):
+    """
+    Scrollable panel of CmdButtons in a FlowLayout.
+    Toolbar: profile name | Load | Save | Save As | Add | Line-ending | connected indicator.
+    """
+    profile_changed = pyqtSignal()   # emitted when profile is modified
+
+    _DEFAULT_PROFILE_PATH = os.path.join(
+        os.path.expanduser("~"), "bluowl_cmd_default.boc")
+
+    def __init__(self, palette: dict, font: QFont, send_fn, parent=None):
+        super().__init__(parent)
+        self._pal       = palette
+        self._font      = font
+        self._send_fn   = send_fn   # callable(command_str)
+        self._profile   = CommandProfile()
+        self._path      = ""        # current file path
+        self._dirty     = False     # unsaved changes
+        self._connected = False
+        self._buttons   : list[CmdButton] = []
+
+        self._build_ui()
+
+    # ── Build UI ──────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ── Toolbar ──────────────────────────────────────────────────────────
+        tb = QWidget(); tb.setObjectName("cmd_tb")
+        tbl = QHBoxLayout(tb)
+        tbl.setContentsMargins(10, 4, 10, 4); tbl.setSpacing(6)
+
+        self._name_lbl = QLabel("Profile:")
+        self._name_edit = QLineEdit(self._profile.name)
+        self._name_edit.setFixedHeight(24); self._name_edit.setMaximumWidth(180)
+        self._name_edit.textChanged.connect(self._on_name_changed)
+
+        load_btn  = QPushButton("📂 Load");  load_btn.setFixedHeight(24)
+        save_btn  = QPushButton("💾 Save");  save_btn.setFixedHeight(24)
+        saveas_btn= QPushButton("💾 Save As"); saveas_btn.setFixedHeight(24)
+        add_btn   = QPushButton("＋ Add Button"); add_btn.setFixedHeight(24)
+        add_btn.setToolTip("Add a new command button")
+
+        load_btn.clicked.connect(self._load_profile)
+        save_btn.clicked.connect(self._save_profile)
+        saveas_btn.clicked.connect(self._save_profile_as)
+        add_btn.clicked.connect(self._add_button)
+
+        tbl.addWidget(self._name_lbl)
+        tbl.addWidget(self._name_edit)
+        tbl.addWidget(load_btn)
+        tbl.addWidget(save_btn)
+        tbl.addWidget(saveas_btn)
+
+        sep = QFrame(); sep.setFrameShape(QFrame.Shape.VLine); sep.setFixedWidth(10)
+        tbl.addWidget(sep)
+
+        tbl.addWidget(QLabel("End:"))
+        self._le_cb = QComboBox(); self._le_cb.addItems(list(LINE_ENDINGS))
+        self._le_cb.setCurrentText(self._profile.line_ending)
+        self._le_cb.setFixedWidth(68); self._le_cb.setFixedHeight(24)
+        self._le_cb.currentTextChanged.connect(self._on_le_changed)
+        tbl.addWidget(self._le_cb)
+
+        sep2 = QFrame(); sep2.setFrameShape(QFrame.Shape.VLine); sep2.setFixedWidth(10)
+        tbl.addWidget(sep2)
+        tbl.addWidget(add_btn)
+
+        tbl.addStretch()
+
+        self._status_lbl = QLabel("● OFFLINE")
+        self._status_lbl.setObjectName("cmd_status")
+        tbl.addWidget(self._status_lbl)
+
+        root.addWidget(tb)
+
+        sep3 = QFrame(); sep3.setFrameShape(QFrame.Shape.HLine)
+        root.addWidget(sep3)
+
+        # ── Scroll area with flow layout ──────────────────────────────────────
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+
+        self._btn_container = QWidget()
+        self._btn_container.setObjectName("cmd_container")
+        self._flow = FlowLayout(self._btn_container, h_spacing=8, v_spacing=8)
+        self._btn_container.setLayout(self._flow)
+        self._btn_container.setAcceptDrops(True)
+        self._btn_container.dragEnterEvent = self._drag_enter
+        self._btn_container.dragMoveEvent  = self._drag_move
+        self._btn_container.dropEvent      = self._drop_event
+
+        scroll.setWidget(self._btn_container)
+        root.addWidget(scroll, stretch=1)
+
+        self._apply_style()
+
+    # ── Style ─────────────────────────────────────────────────────────────────
+    def _apply_style(self):
+        p = self._pal
+        self.findChild(QWidget, "cmd_tb").setStyleSheet(
+            f"QWidget#cmd_tb{{background:{p['bg2']};}}"
+            f"QLabel{{color:{p['fg_dim']};background:transparent;}}"
+            f"QLineEdit{{background:{p['bg2']};color:{p['fg']};border:1px solid {p['border']};padding:2px 5px;}}"
+            f"QPushButton{{background:{p['bg2']};color:{p['fg_dim']};border:1px solid {p['border']};padding:2px 8px;}}"
+            f"QPushButton:hover{{background:{p['bg3']};}}"
+            f"QComboBox{{background:{p['bg2']};color:{p['fg']};border:1px solid {p['border']};padding:1px 4px;}}"
+            f"QComboBox QAbstractItemView{{background:{p['bg2']};color:{p['fg']};}}"
+            f"#cmd_status{{color:{p['fg_dim']};}}"
+        )
+        self.findChild(QWidget, "cmd_container").setStyleSheet(
+            f"QWidget#cmd_container{{background:{p['bg']};padding:10px;}}"
+        )
+
+    def update_style(self, palette: dict, font: QFont):
+        self._pal  = palette
+        self._font = font
+        self._apply_style()
+        for b in self._buttons:
+            b.update_style(palette, font)
+
+    # ── Connected state ───────────────────────────────────────────────────────
+    def set_connected(self, on: bool):
+        self._connected = on
+        p = self._pal
+        if on:
+            self._status_lbl.setText("● CONNECTED")
+            self._status_lbl.setStyleSheet(f"color:{p['green']};font-weight:bold;")
+        else:
+            self._status_lbl.setText("● OFFLINE")
+            self._status_lbl.setStyleSheet(f"color:{p['fg_dim']};")
+        for b in self._buttons:
+            b.set_connected(on)
+
+    # ── Profile name ──────────────────────────────────────────────────────────
+    def _on_name_changed(self, text: str):
+        self._profile.name = text
+        self._mark_dirty()
+
+    def _on_le_changed(self, text: str):
+        self._profile.line_ending = text
+        self._mark_dirty()
+
+    def _mark_dirty(self):
+        self._dirty = True
+        self.profile_changed.emit()
+
+    # ── Add / Edit / Delete buttons ───────────────────────────────────────────
+    def _add_button(self):
+        cfg = ButtonConfig()
+        dlg = ButtonEditDialog(cfg, self._pal, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            cfg = dlg.result_config()
+            self._profile.buttons.append(cfg)
+            self._create_btn_widget(cfg)
+            self._mark_dirty()
+
+    def _create_btn_widget(self, cfg: ButtonConfig) -> CmdButton:
+        btn = CmdButton(cfg, self._pal, self._font,
+                        send_fn=lambda cmd: self._do_send(cmd))
+        btn.set_connected(self._connected)
+        btn.edit_requested.connect(self._on_edit_button)
+        btn.delete_requested.connect(self._on_delete_button)
+        self._flow.addWidget(btn)
+        self._buttons.append(btn)
+        self._btn_container.adjustSize()
+        return btn
+
+    def _on_edit_button(self, btn: CmdButton):
+        dlg = ButtonEditDialog(btn.config, self._pal, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            new_cfg = dlg.result_config()
+            btn.apply_edit(new_cfg)
+            # Sync back to profile
+            idx = self._buttons.index(btn)
+            self._profile.buttons[idx] = new_cfg
+            self._mark_dirty()
+
+    def _on_delete_button(self, btn: CmdButton):
+        idx = self._buttons.index(btn)
+        self._profile.buttons.pop(idx)
+        self._buttons.pop(idx)
+        self._flow.takeAt(idx)
+        btn.setParent(None)
+        btn.deleteLater()
+        self._btn_container.adjustSize()
+        self._mark_dirty()
+
+    # ── Send ──────────────────────────────────────────────────────────────────
+    def _do_send(self, command: str):
+        self._send_fn(command, self._profile.line_ending)
+
+    # ── Load / Save ───────────────────────────────────────────────────────────
+    def _load_profile(self):
+        if self._dirty:
+            r = QMessageBox.question(
+                self, "Unsaved changes",
+                "Current profile has unsaved changes. Load anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if r != QMessageBox.StandardButton.Yes:
+                return
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load Command Profile", "",
+            "BluOwl Command (*.boc);;JSON (*.json);;All (*.*)")
+        if not path:
+            return
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            self._set_profile(CommandProfile.from_dict(d), path)
+        except Exception as ex:
+            QMessageBox.critical(self, "Load failed", str(ex))
+
+    def _save_profile(self):
+        if not self._path:
+            self._save_profile_as()
+            return
+        self._write_profile(self._path)
+
+    def _save_profile_as(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Command Profile", self._path or "",
+            "BluOwl Command (*.boc);;JSON (*.json);;All (*.*)")
+        if path:
+            self._write_profile(path)
+
+    def _write_profile(self, path: str):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(self._profile.to_dict(), f, indent=2)
+            self._path  = path
+            self._dirty = False
+            self.profile_changed.emit()
+        except Exception as ex:
+            QMessageBox.critical(self, "Save failed", str(ex))
+
+    def _set_profile(self, profile: CommandProfile, path: str = ""):
+        self._profile = profile
+        self._path    = path
+        self._dirty   = False
+        # Clear existing buttons
+        for btn in list(self._buttons):
+            idx = self._buttons.index(btn)
+            self._flow.takeAt(idx)
+            btn.setParent(None); btn.deleteLater()
+        self._buttons.clear()
+        # Rebuild
+        self._name_edit.setText(profile.name)
+        self._le_cb.setCurrentText(profile.line_ending)
+        for cfg in profile.buttons:
+            self._create_btn_widget(cfg)
+        self.profile_changed.emit()
+
+    def get_profile(self) -> CommandProfile:
+        return self._profile
+
+    def get_path(self) -> str:
+        return self._path
+
+    def is_dirty(self) -> bool:
+        return self._dirty
+
+    def load_from_path(self, path: str):
+        """Called on startup to auto-load last profile."""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                d = json.load(f)
+            self._set_profile(CommandProfile.from_dict(d), path)
+        except Exception:
+            pass   # silently ignore missing/corrupt file on startup
+
+    # ── Drag-to-reorder ───────────────────────────────────────────────────────
+    def _drag_enter(self, event):
+        if event.mimeData().hasText():
+            event.acceptProposedAction()
+
+    def _drag_move(self, event):
+        event.acceptProposedAction()
+
+    def _drop_event(self, event):
+        src_id = int(event.mimeData().text())
+        # Find source button by id
+        src_btn = next((b for b in self._buttons if id(b) == src_id), None)
+        if src_btn is None:
+            return
+        # Find drop position — which button's centre is closest to drop point
+        drop_pos = event.position().toPoint()
+        target_idx = len(self._buttons) - 1   # default: end
+        for i, btn in enumerate(self._buttons):
+            if btn is src_btn:
+                continue
+            centre_x = btn.x() + btn.width() // 2
+            centre_y = btn.y() + btn.height() // 2
+            if drop_pos.x() < centre_x and abs(drop_pos.y() - centre_y) < btn.height():
+                target_idx = i
+                break
+
+        src_idx = self._buttons.index(src_btn)
+        if src_idx == target_idx:
+            return
+
+        # Reorder in data model
+        cfg = self._profile.buttons.pop(src_idx)
+        self._profile.buttons.insert(target_idx, cfg)
+        self._buttons.pop(src_idx)
+        self._buttons.insert(target_idx, src_btn)
+
+        # Rebuild flow layout order
+        for i in range(self._flow.count()):
+            item = self._flow.takeAt(0)
+            if item and item.widget():
+                item.widget().setParent(None)   # detach without deleting
+        for btn in self._buttons:
+            btn.setParent(self._btn_container)
+            self._flow.addWidget(btn)
+
+        self._btn_container.adjustSize()
+        self._mark_dirty()
+        event.acceptProposedAction()
+
+
+# ─── CMD floating window ───────────────────────────────────────────────────────
+class CmdWindow(QMainWindow):
+    """Floating CMD panel — opens/closes independently of the main window."""
+    closed = pyqtSignal()
+
+    def __init__(self, palette: dict, font: QFont, send_fn, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🎮  CMD — BluOwl")
+        self.setMinimumSize(380, 260)
+        self.resize(620, 380)
+
+        self._panel = CommandPanel(palette=palette, font=font, send_fn=send_fn)
+        self.setCentralWidget(self._panel)
+        self._apply_style(palette)
+
+    def _apply_style(self, palette: dict):
+        p = palette
+        self.setStyleSheet(f"QMainWindow{{background:{p['bg']};}}")
+
+    @property
+    def panel(self) -> CommandPanel:
+        return self._panel
+
+    def closeEvent(self, event):
+        self.closed.emit()
+        event.accept()
+
+
+# ─── Built-in action registry ─────────────────────────────────────────────────
+BUILTIN_ACTIONS = [
+    ("connect",           "Connect / Disconnect"),
+    ("clear",             "Clear live view"),
+    ("export",            "Export log"),
+    ("auto_scroll",       "Toggle auto-scroll"),
+    ("filter_focus",      "Focus filter bar"),
+    ("new_filter_window", "Open new filter window"),
+    ("switch_live",       "Switch to LIVE tab"),
+    ("switch_file",       "Switch to FILE VIEW tab"),
+    ("switch_cmd",        "Switch to CMD tab"),
+    ("timestamp_toggle",  "Toggle timestamps"),
+    ("hex_toggle",        "Toggle HEX mode"),
+]
+
+
+# ─── Key Capture Edit ─────────────────────────────────────────────────────────
+class KeyCaptureEdit(QLineEdit):
+    """
+    Click to activate, then press any key combination.
+    Records the combo as a string like "Ctrl+Shift+F1".
+    Press Escape or Backspace to clear.
+    """
+    captured = pyqtSignal(str)   # emits the new key string (or "" if cleared)
+
+    def __init__(self, current: str = "", parent=None):
+        super().__init__(parent)
+        self.setText(current)
+        self.setReadOnly(True)
+        self.setPlaceholderText("Click then press key combo…")
+        self.setFixedHeight(24)
+        self._active = False
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.NoContextMenu)
+
+    def mousePressEvent(self, event):
+        self._active = True
+        self.setPlaceholderText("Press key combo now…")
+        self.selectAll()
+        super().mousePressEvent(event)
+
+    def focusOutEvent(self, event):
+        self._active = False
+        self.setPlaceholderText("Click then press key combo…")
+        super().focusOutEvent(event)
+
+    def keyPressEvent(self, event):
+        if not self._active:
+            return
+        key = event.key()
+        if key in (Qt.Key.Key_unknown, Qt.Key.Key_Control,
+                   Qt.Key.Key_Shift, Qt.Key.Key_Alt, Qt.Key.Key_Meta):
+            return   # modifier only — wait for a real key
+        if key in (Qt.Key.Key_Escape, Qt.Key.Key_Backspace):
+            self.setText("")
+            self._active = False
+            self.captured.emit("")
+            return
+        mods = event.modifiers()
+        parts = []
+        if mods & Qt.KeyboardModifier.ControlModifier: parts.append("Ctrl")
+        if mods & Qt.KeyboardModifier.ShiftModifier:   parts.append("Shift")
+        if mods & Qt.KeyboardModifier.AltModifier:     parts.append("Alt")
+        # Key name
+        seq  = QKeySequence(key)
+        name = seq.toString()
+        if not name:
+            return
+        parts.append(name)
+        combo = "+".join(parts)
+        self.setText(combo)
+        self._active = False
+        self.captured.emit(combo)
+
+
+# ─── Shortcuts Dialog ─────────────────────────────────────────────────────────
+class ShortcutsDialog(QDialog):
+    """
+    Dedicated dialog for assigning keyboard shortcuts to built-in actions
+    and CMD panel buttons. Opened via Edit → Shortcuts…
+
+    Shortcuts are stored in CommandProfile.shortcuts and saved in the .boc file.
+    Conflict detection prevents two actions sharing the same key combo.
+    """
+
+    def __init__(self, profile: "CommandProfile", palette: dict, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"Keyboard Shortcuts — {profile.name}")
+        self.setModal(True)
+        self.resize(560, 500)
+        self._profile  = profile
+        self._palette  = palette
+        # Working copy — only committed on OK
+        self._shortcuts: dict = dict(profile.shortcuts)
+        self._captures: dict  = {}   # action_id → KeyCaptureEdit widget
+
+        self._build_ui()
+        self._apply_style()
+
+    def _build_ui(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        # Info label
+        info = QLabel("Click a shortcut field and press the key combination.  "
+                      "Backspace or Escape clears the shortcut.")
+        info.setWordWrap(True)
+        root.addWidget(info)
+
+        # Table
+        self._table = QTableWidget()
+        self._table.setColumnCount(3)
+        self._table.setHorizontalHeaderLabels(["Action", "Shortcut", "Global"])
+        self._table.horizontalHeader().setSectionResizeMode(
+            0, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(
+            1, QHeaderView.ResizeMode.Fixed)
+        self._table.horizontalHeader().setSectionResizeMode(
+            2, QHeaderView.ResizeMode.Fixed)
+        self._table.setColumnWidth(1, 160)
+        self._table.setColumnWidth(2, 60)
+        self._table.verticalHeader().setVisible(False)
+        self._table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection)
+        self._table.setEditTriggers(
+            QAbstractItemView.EditTrigger.NoEditTriggers)
+
+        self._populate_table()
+        root.addWidget(self._table, stretch=1)
+
+        # Conflict label
+        self._conflict_lbl = QLabel("")
+        self._conflict_lbl.setStyleSheet("color:#f07878;")
+        root.addWidget(self._conflict_lbl)
+
+        # Buttons
+        bb = QDialogButtonBox()
+        reset_btn = bb.addButton("Reset All to Defaults",
+                                  QDialogButtonBox.ButtonRole.ResetRole)
+        reset_btn.clicked.connect(self._reset_all)
+        bb.addButton(QDialogButtonBox.StandardButton.Cancel)
+        bb.addButton(QDialogButtonBox.StandardButton.Ok)
+        bb.accepted.connect(self._on_ok)
+        bb.rejected.connect(self.reject)
+        root.addWidget(bb)
+
+    def _populate_table(self):
+        rows = []
+        # Built-in actions section
+        rows.append((None, "── Built-in Actions ──", True))
+        for action_id, label in BUILTIN_ACTIONS:
+            rows.append((action_id, f"  {label}", False))
+        # CMD buttons section
+        if self._profile.buttons:
+            rows.append((None, "── CMD Buttons ──", True))
+            for i, btn in enumerate(self._profile.buttons):
+                rows.append((f"cmd_btn_{i}", f"  🎮 CMD: {btn.label}", False))
+
+        self._table.setRowCount(len(rows))
+
+        for row, (action_id, label, is_sep) in enumerate(rows):
+            item = QTableWidgetItem(label)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+            if is_sep:
+                item.setForeground(QColor(self._palette.get("fg_dim","#888")))
+                f = item.font(); f.setBold(True); item.setFont(f)
+                self._table.setItem(row, 0, item)
+                self._table.setRowHeight(row, 20)
+                continue
+
+            self._table.setItem(row, 0, item)
+
+            # Shortcut capture widget
+            current = self._shortcuts.get(action_id, "")
+            cap     = KeyCaptureEdit(current)
+            cap.setProperty("action_id", action_id)
+            cap.captured.connect(
+                lambda combo, aid=action_id: self._on_captured(aid, combo))
+            self._captures[action_id] = cap
+            self._table.setCellWidget(row, 1, cap)
+
+            # Global checkbox
+            cb_widget = QWidget()
+            cb_layout = QHBoxLayout(cb_widget)
+            cb_layout.setContentsMargins(8,0,0,0)
+            cb = QCheckBox()
+            global_key = f"{action_id}__global"
+            cb.setChecked(bool(self._shortcuts.get(global_key, False)))
+            cb.setToolTip("Make this shortcut work globally\n"
+                          "(even when a text field has focus)")
+            cb.stateChanged.connect(
+                lambda state, aid=action_id:
+                    self._on_global_changed(aid, state))
+            cb_layout.addWidget(cb)
+            self._table.setCellWidget(row, 2, cb_widget)
+
+            self._table.setRowHeight(row, 28)
+
+    def _on_captured(self, action_id: str, combo: str):
+        # Check for conflicts
+        if combo:
+            conflicts = [aid for aid, sc in self._shortcuts.items()
+                         if sc == combo and aid != action_id
+                         and not aid.endswith("__global")]
+            if conflicts:
+                conflict_labels = []
+                for c in conflicts:
+                    label = next((l for a,l in BUILTIN_ACTIONS if a==c), None)
+                    if label is None:
+                        try:
+                            idx = int(c.replace("cmd_btn_",""))
+                            label = f"CMD: {self._profile.buttons[idx].label}"
+                        except Exception:
+                            label = c
+                    conflict_labels.append(label)
+                self._conflict_lbl.setText(
+                    f"⚠  Conflict with: {', '.join(conflict_labels)}")
+                # Revert the field
+                cap = self._captures.get(action_id)
+                if cap:
+                    cap.setText(self._shortcuts.get(action_id, ""))
+                return
+        self._conflict_lbl.setText("")
+        if combo:
+            self._shortcuts[action_id] = combo
+        else:
+            self._shortcuts.pop(action_id, None)
+
+    def _on_global_changed(self, action_id: str, state: int):
+        global_key = f"{action_id}__global"
+        if state:
+            self._shortcuts[global_key] = True
+        else:
+            self._shortcuts.pop(global_key, None)
+
+    def _reset_all(self):
+        self._shortcuts.clear()
+        self._conflict_lbl.setText("")
+        # Reset all capture widgets
+        for cap in self._captures.values():
+            cap.setText("")
+        # Reset global checkboxes
+        for row in range(self._table.rowCount()):
+            w = self._table.cellWidget(row, 2)
+            if w:
+                cb = w.findChild(QCheckBox)
+                if cb: cb.setChecked(False)
+
+    def _on_ok(self):
+        if self._conflict_lbl.text():
+            QMessageBox.warning(self, "Conflict",
+                "Please resolve shortcut conflicts before saving.")
+            return
+        self.accept()
+
+    def result_shortcuts(self) -> dict:
+        return self._shortcuts
+
+    def _apply_style(self):
+        p = self._palette
+        self.setStyleSheet(
+            f"QDialog{{background:{p['bg']};color:{p['fg']};}}"
+            f"QTableWidget{{background:{p['bg2']};color:{p['fg']};"
+            f"  gridline-color:{p['border']};border:1px solid {p['border']};}}"
+            f"QTableWidget::item{{padding:2px;}}"
+            f"QHeaderView::section{{background:{p['bg2']};color:{p['fg_dim']};"
+            f"  border:1px solid {p['border']};padding:4px;}}"
+            f"QLabel{{color:{p['fg']};}}"
+            f"QPushButton{{background:{p['bg2']};color:{p['fg_dim']};"
+            f"  border:1px solid {p['border']};padding:3px 10px;}}"
+            f"QPushButton:hover{{background:{p['bg3']};}}"
+            f"QCheckBox{{color:{p['fg']};}}"
+        )
+
+
+# ─── Shortcut Manager ─────────────────────────────────────────────────────────
+class ShortcutManager:
+    """
+    Registers and unregisters QShortcut objects on the main window.
+    Called whenever a profile is loaded or shortcuts are updated.
+
+    Built-in actions are fired via callbacks dict.
+    CMD button shortcuts call the button's send function.
+    Global shortcuts use ApplicationShortcut context so they fire
+    even when a text field has focus.
+    """
+
+    def __init__(self, main_window: QMainWindow, action_callbacks: dict):
+        """
+        action_callbacks: {action_id: callable}
+        e.g. {"connect": self._toggle_connect, "clear": self._clear, ...}
+        """
+        self._win       = main_window
+        self._callbacks = action_callbacks
+        self._shortcuts : list = []   # list of active QShortcut objects
+
+    def apply(self, profile: "CommandProfile"):
+        """Clear all existing shortcuts and register from profile.shortcuts."""
+        self.clear()
+        sc_map = profile.shortcuts
+
+        for action_id, combo in sc_map.items():
+            if action_id.endswith("__global"):
+                continue   # flag key, not a shortcut itself
+            if not combo:
+                continue
+
+            # Determine callback
+            cb = None
+            if action_id in self._callbacks:
+                cb = self._callbacks[action_id]
+            elif action_id.startswith("cmd_btn_"):
+                try:
+                    idx = int(action_id.replace("cmd_btn_", ""))
+                    if idx < len(profile.buttons):
+                        btn = profile.buttons[idx]
+                        cmd = btn.command
+                        le  = profile.line_ending
+                        # Get send function from callback registry
+                        send_fn = self._callbacks.get("__send_command")
+                        if send_fn and cmd:
+                            cb = lambda _cmd=cmd, _le=le: send_fn(_cmd, _le)
+                except (ValueError, IndexError):
+                    continue
+
+            if cb is None:
+                continue
+
+            # Global or window-scope context
+            global_key = f"{action_id}__global"
+            is_global  = bool(sc_map.get(global_key, False))
+            ctx = (Qt.ShortcutContext.ApplicationShortcut
+                   if is_global
+                   else Qt.ShortcutContext.WindowShortcut)
+
+            try:
+                ks = QKeySequence(combo)
+                if ks.isEmpty():
+                    continue
+                sc = QShortcut(ks, self._win, context=ctx)
+                sc.activated.connect(cb)
+                self._shortcuts.append(sc)
+            except Exception:
+                continue   # invalid key sequence — skip silently
+
+    def clear(self):
+        """Remove all registered shortcuts."""
+        for sc in self._shortcuts:
+            try: sc.setEnabled(False); sc.setParent(None)
+            except Exception: pass
+        self._shortcuts.clear()
+
+
 # ─── Filter Pop-Out Window ────────────────────────────────────────────────────
 MAX_FILTER_WINDOWS = 5
 
@@ -2043,6 +3148,42 @@ class BluOwlSerialMonitor(QMainWindow):
         threading.Thread(target=self._refresh_ports, daemon=True).start()
         self._rx_sig.connect(self._on_rx_data)
 
+        # CMD floating window — created after build_ui so palette is ready
+        self._cmd_window = CmdWindow(
+            palette = self._pal,
+            font    = self._font,
+            send_fn = self._send_command,
+        )
+        self._cmd_panel = self._cmd_window.panel  # alias used throughout
+        self._cmd_panel.profile_changed.connect(self._on_cmd_profile_changed)
+        self._cmd_window.closed.connect(self._on_cmd_window_closed)
+
+        # Auto-load last CMD profile
+        last_cmd = s.get("last_cmd_profile", "")
+        if last_cmd and os.path.isfile(last_cmd):
+            self._cmd_panel.load_from_path(last_cmd)
+
+        # Shortcut manager — wired after build_ui so all action methods exist
+        self._shortcut_mgr = ShortcutManager(self, {
+            "connect":           self._toggle_connect,
+            "clear":             self._clear,
+            "export":            self._export,
+            "auto_scroll":       lambda: self._auto_btn.setChecked(
+                                     not self._auto_btn.isChecked()),
+            "filter_focus":      lambda: self._fentry.setFocus(),
+            "new_filter_window": self._open_filter_window,
+            "switch_live":       lambda: self._tabs.setCurrentIndex(0),
+            "switch_file":       lambda: self._tabs.setCurrentIndex(1),
+            "switch_cmd":        self._toggle_cmd_window,
+            "timestamp_toggle":  lambda: self._ts_btn.setChecked(
+                                     not self._ts_btn.isChecked()),
+            "hex_toggle":        lambda: self._hex_btn.setChecked(
+                                     not self._hex_btn.isChecked()),
+            "__send_command":    self._send_command,
+        })
+        # Apply shortcuts from currently loaded profile
+        self._shortcut_mgr.apply(self._cmd_panel.get_profile())
+
         # RX flush timer — drains pending buffer every 50ms
         self._flush_timer=QTimer(); self._flush_timer.setInterval(FLUSH_MS)
         self._flush_timer.timeout.connect(self._flush_pending); self._flush_timer.start()
@@ -2057,6 +3198,14 @@ class BluOwlSerialMonitor(QMainWindow):
 
     # ── UI build ──────────────────────────────────────────────────────────────
     def _build_ui(self):
+        # ── Menu bar ─────────────────────────────────────────────────────────
+        mb = self.menuBar()
+        edit_menu = mb.addMenu("&Edit")
+        sc_action = QAction("⌨  Shortcuts…", self)
+        sc_action.setStatusTip("Assign keyboard shortcuts to actions and CMD buttons")
+        sc_action.triggered.connect(self._open_shortcuts_dialog)
+        edit_menu.addAction(sc_action)
+
         c=QWidget(); self.setCentralWidget(c)
         ml=QVBoxLayout(c); ml.setContentsMargins(0,0,0,0); ml.setSpacing(0)
         self._ml=ml
@@ -2248,6 +3397,10 @@ class BluOwlSerialMonitor(QMainWindow):
         self._popbtn=QPushButton("⊞ NEW WINDOW"); self._popbtn.setFixedHeight(24)
         self._popbtn.setToolTip(f"Open a new filter window (max {MAX_FILTER_WINDOWS})")
         self._popbtn.clicked.connect(self._open_filter_window); lay.addWidget(self._popbtn)
+        self._cmd_win_btn=QPushButton("🎮 CMD"); self._cmd_win_btn.setFixedHeight(24)
+        self._cmd_win_btn.setCheckable(True)
+        self._cmd_win_btn.setToolTip("Open / close the CMD panel window")
+        self._cmd_win_btn.clicked.connect(self._toggle_cmd_window); lay.addWidget(self._cmd_win_btn)
         self._fmlbl=QLabel(""); self._fmlbl.setObjectName("fml"); self._fmlbl.setMaximumWidth(120); lay.addWidget(self._fmlbl)
         self._fpbar=QProgressBar(); self._fpbar.setFixedWidth(90); self._fpbar.setFixedHeight(14)
         self._fpbar.setTextVisible(False); self._fpbar.setVisible(False); lay.addWidget(self._fpbar)
@@ -2300,7 +3453,8 @@ class BluOwlSerialMonitor(QMainWindow):
         self._file_sb=self._make_search_bar(self._file_view)
         fl.addWidget(vtb); fl.addWidget(self._file_sb); fl.addWidget(self._file_view)
         self._tabs.addTab(fw,"📄  FILE VIEW")
-        self._ml.addWidget(self._tabs,stretch=1)
+
+        self._ml.addWidget(self._tabs, stretch=1)
 
     def _make_search_bar(self, view:LogView) -> QWidget:
         sb=QWidget(); sb.setVisible(False)
@@ -2467,6 +3621,9 @@ class BluOwlSerialMonitor(QMainWindow):
         self._live_view.update_style(p,self._font)
         self._file_view.update_style(p,self._font)
         self._file_model.layoutChanged.emit()
+        if hasattr(self, "_cmd_window"):
+            self._cmd_window._apply_style(p)
+            self._cmd_panel.update_style(p, self._font)
         self._send_e.setStyleSheet(f"background:{p['bg2']};color:{p['fg']};border:1px solid {p['border']};padding:2px 5px;")
         self._send_btn.setStyleSheet(f"background:{p['bg2']};color:{p['rx']};border:1px solid {p['rx']};font-weight:bold;padding:4px 10px;")
         self._rx_end_cb.setStyleSheet(f"QComboBox{{background:{p['bg2']};color:{p['fg']};border:1px solid {p['border']};padding:2px 4px;}}QComboBox QAbstractItemView{{background:{p['bg2']};color:{p['fg']};}}")
@@ -2575,6 +3732,9 @@ class BluOwlSerialMonitor(QMainWindow):
             self._conn_btn.setStyleSheet(f"color:{p['green']};border-color:{p['green']};font-weight:bold;")
             self._send_e.setEnabled(False); self._send_btn.setEnabled(False)
             for cb in(self._port_cb,self._baud_cb,self._data_cb,self._par_cb,self._stop_cb): cb.setEnabled(True)
+        # Propagate to CMD window
+        if hasattr(self, "_cmd_panel"):
+            self._cmd_panel.set_connected(on)
 
     # ── RX ────────────────────────────────────────────────────────────────────
     def _on_rx_data(self, chunk: bytes):
@@ -2836,7 +3996,41 @@ class BluOwlSerialMonitor(QMainWindow):
         if idx==1 and self._viewer_path and self._viewer_indexed:
             self._start_file_filter()
 
-    # ── Export ────────────────────────────────────────────────────────────────
+    # ── CMD panel send ────────────────────────────────────────────────────────
+    def _send_command(self, command: str, line_ending: str = "CRLF"):
+        """Send a command from the CMD panel — bypasses the TX entry field."""
+        if not self._running:
+            return
+        ending = LINE_ENDINGS.get(line_ending, b"\r\n")
+        data = command.encode("utf-8") + ending
+        try:
+            self._serial_port.write(data)
+        except serial.SerialException as e:
+            self.statusBar().showMessage(f"Send error: {e}"); return
+        self.tx_count += len(data)
+        self._slbl.setText(f"TX: {self.tx_count}B   RX: {self.rx_count}B")
+        self._add_entry("tx", command)
+
+    # ── Shortcuts dialog ──────────────────────────────────────────────────────
+    def _open_shortcuts_dialog(self):
+        profile = self._cmd_panel.get_profile()
+        dlg     = ShortcutsDialog(profile, self._pal, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            profile.shortcuts = dlg.result_shortcuts()
+            self._shortcut_mgr.apply(profile)
+            self._cmd_panel._mark_dirty()   # shortcuts saved in .boc profile
+
+    def _on_cmd_profile_changed(self):
+        p     = self._cmd_panel.get_profile()
+        dirty = " *" if self._cmd_panel.is_dirty() else ""
+        self._cmd_window.setWindowTitle(f"🎮  CMD — {p.name}{dirty}")
+        path = self._cmd_panel.get_path()
+        if path:
+            s = load_settings(); s["last_cmd_profile"] = path; save_settings(s)
+        # Re-apply shortcuts whenever profile changes (load/save/edit)
+        if hasattr(self, "_shortcut_mgr"):
+            self._shortcut_mgr.apply(p)
+
     # ── Jump to source ────────────────────────────────────────────────────────
     def _jump_to_source(self):
         # In live view (QPlainTextEdit), get the block number of current cursor
@@ -2902,6 +4096,20 @@ class BluOwlSerialMonitor(QMainWindow):
         try: self._filter_windows.remove(fw)
         except ValueError: pass
         self._update_popbtn_label()
+
+    # ── CMD window ────────────────────────────────────────────────────────────
+    def _toggle_cmd_window(self):
+        if self._cmd_window.isVisible():
+            self._cmd_window.hide()
+            self._cmd_win_btn.setChecked(False)
+        else:
+            self._cmd_window.show()
+            self._cmd_window.raise_()
+            self._cmd_window.activateWindow()
+            self._cmd_win_btn.setChecked(True)
+
+    def _on_cmd_window_closed(self):
+        self._cmd_win_btn.setChecked(False)
 
     def _update_popbtn_label(self):
         n = len(self._filter_windows)
@@ -3123,6 +4331,9 @@ class BluOwlSerialMonitor(QMainWindow):
         for fw in list(self._filter_windows):
             try: fw.close()
             except Exception: pass
+        # Clear shortcut manager
+        if hasattr(self, "_shortcut_mgr"):
+            self._shortcut_mgr.clear()
         # Wait for background workers (capped to avoid UI freeze)
         for w in (self._filter_worker, self._viewer_iworker,
                   self._viewer_fworker, self._rx_worker):
